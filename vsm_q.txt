@@ -1,0 +1,108 @@
+import os
+import numpy as np
+import pandas as pd
+from collections import Counter
+
+def load_from_folder(folder_path):
+    """Loads all .txt files from a folder into a dictionary."""
+    data = {}
+    try:
+        # Sort files to ensure consistent order (d1, d2, d10)
+        sorted_files = sorted(os.listdir(folder_path), key=lambda f: int("".join(filter(str.isdigit, f)) or 0))
+        for filename in sorted_files:
+            if filename.endswith(".txt"):
+                doc_id = filename.split('.')[0]
+                with open(os.path.join(folder_path, filename), 'r', encoding='utf-8') as f:
+                    data[doc_id] = f.read().strip()
+    except FileNotFoundError:
+        print(f"Error: Folder '{folder_path}' not found.")
+    return data
+
+def preprocess(docs_raw):
+    """Converts the raw document strings into a dictionary of token lists."""
+    processed_docs = {}
+    for doc_id, text in docs_raw.items():
+        processed_docs[doc_id] = text.split()
+    return processed_docs
+
+def compute_tfidf_matrix(processed_docs, vocabulary):
+    """Computes the TF-IDF matrix for a document collection."""
+    Nd = len(processed_docs)
+    doc_ids = sorted(processed_docs.keys())
+    
+    # Calculate document frequency (dk) for all terms
+    dk = {term: 0 for term in vocabulary}
+    for term in vocabulary:
+        for tokens in processed_docs.values():
+            if term in tokens:
+                dk[term] += 1
+                
+    tfidf_matrix = pd.DataFrame(0.0, index=vocabulary, columns=doc_ids)
+    for term in vocabulary:
+        for doc_id, tokens in processed_docs.items():
+            tf = tokens.count(term)
+            if tf > 0 and dk.get(term, 0) > 0:
+                weight = tf * np.log10(Nd / dk[term])
+                tfidf_matrix.loc[term, doc_id] = weight
+    
+    return tfidf_matrix, dk
+
+def compute_query_vector(query_tokens, vocabulary, dk, Nd):
+    query_vector = np.zeros(len(vocabulary))
+    query_tf = Counter(query_tokens)
+    
+    for i, term in enumerate(vocabulary):
+        tf = query_tf.get(term, 0)
+        if tf > 0 and dk.get(term, 0) > 0:
+            weight = tf * np.log10(Nd / dk[term])
+            query_vector[i] = weight
+            
+    return query_vector
+
+def cosine_similarity(doc_vec, query_vec):
+    dot_product = np.dot(doc_vec, query_vec)
+    norm_doc = np.linalg.norm(doc_vec)
+    norm_query = np.linalg.norm(query_vec)
+    if norm_doc == 0 or norm_query == 0:
+        return 0.0
+    return dot_product / (norm_doc * norm_query)
+
+if __name__ == "__main__":
+    docs_folder = "docs"
+    queries_folder = "queries"
+    with open("docs/d1.txt", "w") as f: f.write("t1")
+
+    raw_docs = load_from_folder(docs_folder)
+    processed_docs = preprocess(raw_docs)
+    
+    all_tokens = []
+    for tokens in processed_docs.values():
+        all_tokens.extend(tokens)
+    vocabulary = sorted(list(set(all_tokens)))
+    
+    tfidf_matrix, doc_frequencies = compute_tfidf_matrix(processed_docs, vocabulary)
+    print("--- Computed TF-IDF Matrix for Documents ---")
+    print(tfidf_matrix.round(3))
+    
+    raw_queries = load_from_folder(queries_folder)
+    Nd = len(processed_docs)
+    
+    print("\n--- Processing Queries ---")
+    for query_id, query_text in raw_queries.items():
+        print(f"\n===== Results for Query: '{query_text}' ({query_id}) =====")
+        
+        processed_query = query_text.split()
+        query_vector = compute_query_vector(processed_query, vocabulary, doc_frequencies, Nd)
+        
+        scores = {}
+        for doc_id in sorted(processed_docs.keys()):
+            doc_vector = tfidf_matrix[doc_id].values
+            score = cosine_similarity(doc_vector, query_vector)
+            scores[doc_id] = score
+        
+        ranked_docs = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        rank_df = pd.DataFrame(ranked_docs, columns=['Document', 'Score'])
+        rank_df['Rank'] = range(1, len(rank_df) + 1)
+        
+        print("Final Document Ranking:")
+        print(rank_df)

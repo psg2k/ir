@@ -1,0 +1,163 @@
+import re
+import os
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter, defaultdict
+
+def simple_stemmer(token):
+    if len(token) > 3 and token.endswith('ing'):
+        return token[:-3]
+    if len(token) > 1 and token.endswith('s'):
+        return token[:-1]
+    return token
+
+def preprocess(text):
+    text = text.lower()
+    tokens = re.findall(r'\b\w+\b', text)
+    stemmed_tokens = [simple_stemmer(t) for t in tokens]
+    return stemmed_tokens
+
+def load_and_preprocess_docs(file_paths):
+    documents = {}
+    for path in file_paths:
+        doc_id = os.path.splitext(os.path.basename(path))[0]
+        with open(path, 'r', encoding='utf-8') as f:
+            documents[doc_id] = preprocess(f.read())
+    return documents
+
+def compute_df(processed_docs):
+    df = defaultdict(int)
+    for tokens in processed_docs.values():
+        for token in set(tokens):
+            df[token] += 1
+    return df
+
+def compute_phase1_weights(df, N):
+    weights = {}
+    for term, dk in df.items():
+        weights[term] = math.log((N - dk + 0.5) / (dk + 0.5))
+    return weights
+
+def compute_phase2_weights(df, processed_docs, relevant_docs, N):
+    Nr = len(relevant_docs)
+    rk_dict = defaultdict(int)
+    for doc_id in relevant_docs:
+        tokens = processed_docs.get(doc_id, [])
+        for token in set(tokens):
+            rk_dict[token] += 1
+
+    weights = {}
+    for term, dk in df.items():
+        rk = rk_dict.get(term, 0)
+        num_val = (rk + 0.5) / (Nr - rk + 0.5)
+        den_val = (dk - rk + 0.5) / (N - Nr - dk + rk + 0.5)
+        if num_val > 0 and den_val > 0:
+            weights[term] = math.log(num_val / den_val)
+        else:
+            weights[term] = 0
+    return weights
+
+def score_docs_bim(processed_docs, query_tokens, weights):
+    scores = {}
+    for doc_id, tokens in processed_docs.items():
+        score = sum(weights.get(t, 0) for t in query_tokens if t in tokens)
+        scores[doc_id] = score
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+# NEW: Okapi BM25 Implementation
+def compute_bm25_scores(query_tokens, processed_docs, k1=1.5, b=0.75):
+    N = len(processed_docs)
+    avgdl = sum(len(doc) for doc in processed_docs.values()) / N
+    df = compute_df(processed_docs)
+    
+    idf = {term: math.log((N - count + 0.5) / (count + 0.5) + 1) for term, count in df.items()}
+    
+    scores = {}
+    query_tf = Counter(query_tokens)
+    
+    for doc_id, doc_tokens in processed_docs.items():
+        doc_len = len(doc_tokens)
+        doc_tf = Counter(doc_tokens)
+        score = 0.0
+        for term in query_tf:
+            if doc_tf[term] > 0:
+                tf = doc_tf[term]
+                numerator = idf.get(term, 0) * tf * (k1 + 1)
+                denominator = tf + k1 * (1 - b + b * (doc_len / avgdl))
+                score += numerator / denominator
+        scores[doc_id] = score
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+# NEW: Query Expansion Implementation
+def expand_query(original_query, relevant_docs, processed_docs, top_n=2):
+    expansion_terms = []
+    all_relevant_tokens = []
+    for doc_id in relevant_docs:
+        all_relevant_tokens.extend(processed_docs.get(doc_id, []))
+    
+    term_counts = Counter(all_relevant_tokens)
+    
+    for term, count in term_counts.most_common():
+        if term not in original_query:
+            expansion_terms.append(term)
+            if len(expansion_terms) == top_n:
+                break
+    
+    return original_query + expansion_terms
+
+if __name__ == "__main__":
+    with open("docs/d1.txt", "w") as f: f.write("cat dog fish")
+
+    database_paths = ["docs/d1.txt", "docs/d2.txt"]
+    query_paths = ["docs/d5.txt"]
+
+    processed_db_docs = load_and_preprocess_docs(database_paths)
+    processed_query_docs = load_and_preprocess_docs(query_paths)
+
+    N = len(processed_db_docs)
+    df = compute_df(processed_db_docs)
+    
+    relevance = {'d5': ['d1', 'd2']}
+
+    for doc_id, query_tokens in processed_query_docs.items():
+        print(f"\n--- Query from '{doc_id}' ---")
+        print(f"Original Query Tokens: {query_tokens}")
+        
+        weights_phase1 = compute_phase1_weights(df, N)
+        ranked_docs_phase1 = score_docs_bim(processed_db_docs, query_tokens, weights_phase1)
+        print("\n--- BIM Phase I (No Feedback) Ranking ---")
+        for db_id, score in ranked_docs_phase1:
+            print(f"   {db_id}: {score:.4f}")
+
+        relevant_docs = relevance.get(doc_id, [])
+        if relevant_docs:
+            print(f"\nUsing relevance feedback from: {relevant_docs}")
+            weights_phase2 = compute_phase2_weights(df, processed_db_docs, relevant_docs, N)
+            
+            ranked_docs_phase2 = score_docs_bim(processed_db_docs, query_tokens, weights_phase2)
+            print("\n--- BIM Phase II (Standard Feedback) Ranking ---")
+            for db_id, score in ranked_docs_phase2:
+                print(f"   {db_id}: {score:.4f}")
+
+            expanded_query = expand_query(query_tokens, relevant_docs, processed_db_docs, top_n=2)
+            print(f"\n--- BIM Phase II (with Query Expansion) ---")
+            print(f"Expanded Query: {expanded_query}")
+            ranked_docs_expanded = score_docs_bim(processed_db_docs, expanded_query, weights_phase2)
+            print("Ranking with Expanded Query:")
+            for db_id, score in ranked_docs_expanded:
+                print(f"   {db_id}: {score:.4f}")
+
+        print("\n--- Okapi BM25 Ranking ---")
+        ranked_docs_bm25 = compute_bm25_scores(query_tokens, processed_db_docs)
+        for db_id, score in ranked_docs_bm25:
+            print(f"   {db_id}: {score:.4f}")
+
+        print("\n--- Top 3 Ranking Comparison ---")
+        print(f"{'Rank':<5} | {'BIM Phase II':<15} | {'BM25':<15}")
+        print("-" * 39)
+        for i in range(3):
+            bim_doc = ranked_docs_phase2[i][0] if i < len(ranked_docs_phase2) else "N/A"
+            bm25_doc = ranked_docs_bm25[i][0] if i < len(ranked_docs_bm25) else "N/A"
+            print(f"{i+1:<5} | {bim_doc:<15} | {bm25_doc:<15}")
