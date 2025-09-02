@@ -1,0 +1,175 @@
+import os
+import re
+import math
+from collections import Counter, defaultdict
+
+def load_data_from_folder(folder_path):
+    data = []
+    try:
+        sorted_files = sorted(os.listdir(folder_path), key=lambda f: int(re.search(r'\d+', f).group()))
+        for filename in sorted_files:
+            if filename.endswith(".txt"):
+                with open(os.path.join(folder_path, filename), 'r', encoding='utf-8') as f:
+                    data.append(f.read().strip())
+    except FileNotFoundError:
+        print(f"Error: Folder '{folder_path}' not found.")
+    return data
+
+def parse_docs(doc_list):
+    doc_dict = {}
+    for i, doc_string in enumerate(doc_list):
+        doc_id = f"D{i+1}"
+        parts = doc_string.split(':', 1)
+        if len(parts) == 2:
+            title, content = parts[0].strip(), parts[1].strip()
+            doc_dict[doc_id] = {'title': title, 'content': content}
+        else:
+            doc_dict[doc_id] = {'title': f"Untitled Document {doc_id}", 'content': doc_string}
+    return doc_dict
+
+def preprocess(text):
+    tokens = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+    return tokens
+
+def binary_distance(tokens1, tokens2):
+    if set(tokens1) == set(tokens2):
+        return 0
+    else:
+        return 1
+
+def compute_vsm_vectors(processed_docs):
+    N = len(processed_docs)
+    df_scores = Counter()
+    for tokens in processed_docs.values():
+        df_scores.update(set(tokens))
+
+    vectors = defaultdict(dict)
+    for doc_id, tokens in processed_docs.items():
+        doc_len = len(tokens)
+        if doc_len == 0:
+            continue
+        tf_scores = Counter(tokens)
+        for token, tf in tf_scores.items():
+            df = df_scores[token]
+            weight = (tf / doc_len) * math.log((N + 1) / (df + 0.5))
+            vectors[doc_id][token] = weight
+    return vectors
+
+def cosine_similarity(vec1, vec2):
+    """Calculates cosine similarity between two sparse vector dictionaries."""
+    dot_product = 0
+    for k in set(vec1.keys()) & set(vec2.keys()):
+        dot_product += vec1.get(k, 0) * vec2.get(k, 0)
+    
+    mag_vec1 = math.sqrt(sum(v**2 for v in vec1.values()))
+    mag_vec2 = math.sqrt(sum(v**2 for v in vec2.values()))
+    
+    if mag_vec1 == 0 or mag_vec2 == 0:
+        return 0.0
+    return dot_product / (mag_vec1 * mag_vec2)
+
+def generate_shingles(text, k=3):
+    """Generates a set of k-shingles from a string."""
+    shingles = set()
+    text = re.sub(r'\s+', ' ', text.lower())
+    for i in range(len(text) - k + 1):
+        shingles.add(text[i:i+k])
+    return shingles
+
+def jaccard_similarity(set1, set2):
+    """Calculates Jaccard similarity between two sets."""
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+    return intersection / union if union > 0 else 0.0
+
+def compute_bm25_scores(query_tokens, db_processed, k1=1.5, b=0.75):
+    N = len(db_processed)
+    avgdl = sum(len(doc) for doc in db_processed.values()) / N
+    df = Counter()
+    for doc in db_processed.values():
+        df.update(set(doc))
+    
+    idf = {}
+    for term, count in df.items():
+        idf[term] = math.log((N - count + 0.5) / (count + 0.5) + 1)
+    
+    scores = {}
+    query_tf = Counter(query_tokens)
+
+    for doc_id, doc_tokens in db_processed.items():
+        doc_len = len(doc_tokens)
+        score = 0.0
+        for term in query_tf:
+            if term in doc_tokens:
+                tf = Counter(doc_tokens)[term]
+                numerator = idf.get(term, 0) * tf * (k1 + 1)
+                denominator = tf + k1 * (1 - b + b * (doc_len / avgdl))
+                score += numerator / denominator
+        scores[doc_id] = score
+    return scores
+
+if __name__ == "__main__":
+    # Define folder paths
+    db_folder = "database_docs"
+    new_docs_folder = "new_docs"
+
+    db_data = load_data_from_folder(db_folder)
+    new_docs_data = load_data_from_folder(new_docs_folder)
+
+    # Parse and preprocess database
+    db_docs = parse_docs(db_data)
+    
+    db_processed = {}
+    for doc_id, data in db_docs.items():
+        db_processed[doc_id] = preprocess(data['content'])
+        
+    db_vectors = compute_vsm_vectors(db_processed)
+
+    new_docs = parse_docs(new_docs_data)
+    for new_id, new_data in new_docs.items():
+        print(f"\n===== Checking New Document '{new_id}: {new_data['title']}' =====")
+        is_duplicate = False
+
+        print("\n--- A) Title Check (Binary Distance) ---")
+        new_title_tokens = preprocess(new_data['title'])
+        for db_id, db_data in db_docs.items():
+            db_title_tokens = preprocess(db_data['title'])
+            if binary_distance(new_title_tokens, db_title_tokens) == 0:
+                print(f"Result: DUPLICATE title found with '{db_id}'. Discarding.")
+                is_duplicate = True
+                break
+        if is_duplicate: continue
+        print("Result: No exact title match found. Proceeding...")
+
+        new_content_tokens = preprocess(new_data['content'])
+
+        print("\n--- C) Content Check (VSM + Cosine Similarity) ---")
+        new_doc_vector_dict = compute_vsm_vectors({new_id: new_content_tokens})
+        new_doc_vector = new_doc_vector_dict.get(new_id, {})
+        
+        max_vsm_score, most_similar_vsm = 0, None
+        for db_id, db_vector in db_vectors.items():
+            sim = cosine_similarity(new_doc_vector, db_vector)
+            if sim > max_vsm_score:
+                max_vsm_score, most_similar_vsm = sim, db_id
+        
+        print(f"Most similar document is '{most_similar_vsm}' with score: {max_vsm_score:.4f}")
+        if max_vsm_score > 0.85:
+            print("Result: DUPLICATE found (Cosine Similarity > 0.85).")
+        else:
+            print("Result: No duplicate found.")
+
+        print("\n--- D) Content Check (k-Shingles + Jaccard) ---")
+        new_shingles = generate_shingles(new_data['content'], k=5)
+        max_jaccard_score, most_similar_jaccard = 0, None
+        for db_id, db_data in db_docs.items():
+            db_shingles = generate_shingles(db_data['content'], k=5)
+            sim = jaccard_similarity(new_shingles, db_shingles)
+            if sim > max_jaccard_score:
+                max_jaccard_score, most_similar_jaccard = sim, db_id
+        print(f"Most similar document is '{most_similar_jaccard}' with score: {max_jaccard_score:.4f}")
+
+        print("\n--- E) Content Check (Okapi BM25) ---")
+        bm25_scores = compute_bm25_scores(new_content_tokens, db_processed)
+        best_match_bm25 = sorted(bm25_scores.items(), key=lambda item: item[1], reverse=True)[0]
+        print(f"Top matching document is '{best_match_bm25[0]}' with score: {best_match_bm25[1]:.4f}")

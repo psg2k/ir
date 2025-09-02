@@ -1,0 +1,148 @@
+import re
+import os
+import math
+from collections import defaultdict
+
+def simple_stemmer(token):
+    """A basic stemmer that handles common English suffixes."""
+    if len(token) > 3 and token.endswith('ing'):
+        return token[:-3]
+    if len(token) > 1 and token.endswith('s'):
+        return token[:-1]
+    return token
+
+def preprocess(text):
+    text = text.lower()
+    tokens = re.findall(r'\b\w+\b', text)
+    stemmed_tokens = []
+    for t in tokens:
+        stemmed_tokens.append(simple_stemmer(t))
+    return stemmed_tokens
+
+def load_and_preprocess_docs(file_paths):
+    documents = {}
+    for path in file_paths:
+        doc_id = os.path.splitext(os.path.basename(path))[0]
+        with open(path, 'r', encoding='utf-8') as f:
+            documents[doc_id] = preprocess(f.read())
+    return documents
+
+def compute_vsm_vectors(processed_docs):
+    N = len(processed_docs)
+    df_scores = defaultdict(int)
+    for tokens in processed_docs.values():
+        for token in set(tokens):
+            df_scores[token] += 1
+
+    vectors = defaultdict(dict)
+    for doc_id, tokens in processed_docs.items():
+        len_i = len(tokens)
+        if len_i == 0:
+            continue
+        tf_scores = defaultdict(int)
+        for token in tokens:
+            tf_scores[token] += 1
+        for token, tf in tf_scores.items():
+            df = df_scores[token]
+            weight = (tf / len_i) * math.log((N + 1) / (0.5 + df))
+            vectors[doc_id][token] = weight
+    return vectors, df_scores
+
+def create_single_vector(tokens, N, df_scores):
+    vector = {}
+    len_i = len(tokens)
+    if len_i == 0:
+        return vector
+    tf_scores = defaultdict(int)
+    for token in tokens:
+        tf_scores[token] += 1
+    for token, tf in tf_scores.items():
+        df = df_scores.get(token, 0)
+        weight = (tf / len_i) * math.log((N + 1) / (0.5 + df))
+        vector[token] = weight
+    return vector
+
+def calculate_vector_components(vec1, vec2):
+    dot_product = 0.0
+    sum_sq_vec1 = 0.0
+    sum_sq_vec2 = 0.0
+    
+    for k in set(vec1.keys()) | set(vec2.keys()):
+        v1 = vec1.get(k, 0)
+        v2 = vec2.get(k, 0)
+        dot_product += v1 * v2
+        sum_sq_vec1 += v1**2
+        sum_sq_vec2 += v2**2
+        
+    return dot_product, sum_sq_vec1, sum_sq_vec2
+
+def simple_matching(dot_product):
+    return dot_product
+
+def cosine_coefficient(dot_product, sum_sq_vec1, sum_sq_vec2):
+    magnitude = math.sqrt(sum_sq_vec1) * math.sqrt(sum_sq_vec2)
+    if magnitude == 0:
+        return 0.0
+    return dot_product / magnitude
+
+def dice_coefficient(dot_product, sum_sq_vec1, sum_sq_vec2):
+    denominator = sum_sq_vec1 + sum_sq_vec2
+    if denominator == 0:
+        return 0.0
+    return (2 * dot_product) / denominator
+
+def jaccard_coefficient(dot_product, sum_sq_vec1, sum_sq_vec2):
+    denominator = sum_sq_vec1 + sum_sq_vec2 - dot_product
+    if denominator == 0:
+        return 0.0
+    return dot_product / denominator
+
+if __name__ == "__main__":
+    with open("docs/d1.txt", "w") as f: f.write("the cat sat on the mat")
+
+    database_paths = ["docs/d1.txt", "docs/d2.txt", "docs/d3.txt"]
+    new_doc_paths = ["docs/d4.txt", "docs/d5.txt"]
+
+    try:
+        processed_db_docs = load_and_preprocess_docs(database_paths)
+        processed_new_docs = load_and_preprocess_docs(new_doc_paths)
+    except FileNotFoundError:
+        print("Error: Could not find one of the document files. Please ensure they exist.")
+        exit()
+
+    db_vectors, df_scores = compute_vsm_vectors(processed_db_docs)
+    N = len(processed_db_docs)
+    print(f"Database built successfully from {N} documents.\n")
+
+    threshold = 0.60
+
+    for doc_id, new_doc_tokens in processed_new_docs.items():
+        new_doc_vector = create_single_vector(new_doc_tokens, N, df_scores)
+        print(f"--- Checking '{doc_id}' ---")
+
+        results = []
+        for db_id, db_vector in db_vectors.items():
+            dot_prod, sum_sq1, sum_sq2 = calculate_vector_components(new_doc_vector, db_vector)
+            
+            sim_scores = {
+                "Simple Matching": simple_matching(dot_prod),
+                "Cosine": cosine_coefficient(dot_prod, sum_sq1, sum_sq2),
+                "Dice": dice_coefficient(dot_prod, sum_sq1, sum_sq2),
+                "Jaccard": jaccard_coefficient(dot_prod, sum_sq1, sum_sq2)
+            }
+            results.append((db_id, sim_scores))
+
+        results.sort(key=lambda x: x[1]['Cosine'], reverse=True)
+
+        for db_id, scores in results:
+            print(f"  Similarity with '{db_id}':")
+            for measure, score in scores.items():
+                print(f"    - {measure:<15}: {score:.4f}")
+
+        if results and results[0][1]['Cosine'] > threshold:
+            most_similar_doc = results[0][0]
+            print(f"  -> Verdict: DUPLICATE FOUND (most similar: {most_similar_doc})\n")
+        else:
+            print(f"  -> Verdict: NOT a duplicate (all Cosine scores <= {threshold})\n")
+            
+        print("-" * 25)

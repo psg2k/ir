@@ -1,0 +1,156 @@
+import re
+import os
+from collections import defaultdict, Counter
+
+def load_docs(file_paths):
+    documents = {}
+    for path in file_paths:
+        doc_id = os.path.splitext(os.path.basename(path))[0]
+        with open(path, 'r', encoding='utf-8') as f:
+            documents[doc_id] = f.read()
+    return documents
+
+def simple_stemmer(token):
+    if len(token) > 3 and token.endswith('ing'):
+        return token[:-3]
+    if len(token) > 2 and token.endswith('ed'):
+        return token[:-2]
+    if len(token) > 2 and token.endswith('es'):
+        return token[:-2]
+    if len(token) > 1 and token.endswith('s'):
+        return token[:-1]
+    return token
+    
+def find_corpus_stopwords(raw_docs, top_n=10):
+    all_text = " ".join(raw_docs.values())
+    all_text = all_text.lower()
+    tokens = re.findall(r'\b\w+\b', all_text)
+    
+    stemmed_tokens = []
+    for t in tokens:
+        stemmed_tokens.append(simple_stemmer(t))
+    
+    term_counts = Counter(stemmed_tokens)
+    
+    stopwords = set()
+    most_common_pairs = term_counts.most_common(top_n)
+    for term, count in most_common_pairs:
+        stopwords.add(term)
+        
+    return stopwords
+
+def preprocess(text, stop_words):
+    text = text.lower()
+    tokens = re.findall(r'\b[a-zA-Z-0-9]+\b', text)
+    
+    processed_tokens = []
+    for t in tokens:
+        stemmed_t = simple_stemmer(t)
+        if stemmed_t not in stop_words :
+            processed_tokens.append(stemmed_t)
+            
+    return processed_tokens
+
+#to keep hyphenated words : re.findall(r'\b[\w-]+\b', text)
+def build_inverted_index(processed_docs):
+    inverted_index = defaultdict(set)
+    for doc_id, tokens in processed_docs.items():
+        for token in tokens:
+            inverted_index[token].add(doc_id)
+    return inverted_index
+
+def process_query(query, index, all_doc_ids):
+    or_parts = query.lower().split(' or ')
+    result_sets_for_or = []
+    
+    for part in or_parts:
+        and_parts = part.split(' and ')
+        sets_for_and = []
+        
+        for term_part in and_parts:
+            term_part = term_part.strip().replace('(', '').replace(')', '')
+            
+            if term_part.startswith('not '):
+                term = term_part[4:]
+                stem = simple_stemmer(term)
+                term_docs = index.get(stem, set())
+                sets_for_and.append(all_doc_ids - term_docs)
+            else:
+                term = term_part
+                stem = simple_stemmer(term)
+                sets_for_and.append(index.get(stem, set()))
+
+        if sets_for_and:
+            intersected_set = sets_for_and[0].copy()
+            for s in sets_for_and[1:]:
+                intersected_set.intersection_update(s)
+            result_sets_for_or.append(intersected_set)
+
+    final_result = set()
+    for s in result_sets_for_or:
+        final_result.update(s)
+        
+    return final_result
+
+folder_path = '/content/drive/MyDrive/IR_lab/docs'
+file_paths = []
+try:
+    all_files = os.listdir(folder_path)
+    
+    sorted_files = sorted(all_files, key=lambda f: int(re.search(r'\d+', f).group()))
+    
+    for filename in sorted_files:
+        if filename.endswith(".txt"):
+            full_path = os.path.join(folder_path, filename)
+            file_paths.append(full_path)
+
+except FileNotFoundError:
+    print(f"Error: The folder '{folder_path}' was not found.")
+
+print("Generated File Paths:")
+print(file_paths)
+
+#file_paths = ["d1.txt"]
+try:
+    raw_docs = load_docs(file_paths)
+except FileNotFoundError as e:
+    print(f"\nERROR: File not found -> {e.filename}")
+    exit()
+print("raw docs:",raw_docs)
+
+corpus_stopwords = find_corpus_stopwords(raw_docs, top_n=3)
+print(f"Dynamically found stopwords (top 3): {corpus_stopwords}\n")
+
+processed_docs = {}
+for doc_id, text in raw_docs.items():
+    processed_docs[doc_id] = preprocess(text, corpus_stopwords)
+
+print("processed docs:",processed_docs)
+inverted_index = build_inverted_index(processed_docs)
+print("--- Inverted Index ---")
+for term, doc_ids in inverted_index.items():
+    print(f"'{term}': {sorted(list(doc_ids))}")
+
+print("\n--- Term-Document Matrix ---")
+all_doc_ids = set(processed_docs.keys())
+vocabulary = sorted(inverted_index.keys())
+doc_ids_sorted = sorted(list(all_doc_ids))
+td_matrix_data = []
+for term in vocabulary:
+    row = []
+    for doc_id in doc_ids_sorted:
+        if doc_id in inverted_index[term]:
+            row.append(1)
+        else:
+            row.append(0)
+    td_matrix_data.append(row)
+
+print(f"Vocabulary (Rows): {vocabulary}")
+print(f"Documents (Columns): {doc_ids_sorted}")
+print(f"Matrix Data: {td_matrix_data}")
+
+print("\n--- Running Boolean Queries ---")
+queries = ["cat AND dog", "mat OR log", "dog AND NOT cat"]
+for q in queries:
+    result_docs = process_query(q, inverted_index, all_doc_ids)
+    print(f"Query: '{q}' → Result: {sorted(list(result_docs))}")
